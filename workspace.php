@@ -248,6 +248,11 @@ $studentTree = get_student_tree($targetStudentId);
             background: rgba(2, 6, 23, 0.4);
         }
 
+        .button-like:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
@@ -287,6 +292,78 @@ $studentTree = get_student_tree($targetStudentId);
             margin: 10px 0 0;
             padding-left: 18px;
             line-height: 1.8;
+        }
+
+        .sqlite-table-button {
+            padding: 2px 0;
+            border: 0;
+            background: transparent;
+            color: #93c5fd;
+            cursor: pointer;
+            font: inherit;
+            text-align: left;
+        }
+
+        .sqlite-table-button:hover {
+            color: #dbeafe;
+            text-decoration: underline;
+        }
+
+        .create-item-dialog {
+            width: min(420px, calc(100% - 32px));
+            padding: 0;
+            color: #e2e8f0;
+            background: #0f172a;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            border-radius: 12px;
+        }
+
+        .create-item-dialog::backdrop {
+            background: rgba(2, 6, 23, 0.72);
+        }
+
+        .create-item-dialog form {
+            padding: 20px;
+        }
+
+        .create-item-dialog h2 {
+            margin: 0 0 18px;
+            font-size: 1.15rem;
+        }
+
+        .create-item-dialog label {
+            display: block;
+            margin-bottom: 8px;
+            color: #cbd5e1;
+        }
+
+        .create-item-dialog input {
+            width: 100%;
+            padding: 10px 12px;
+            color: #f8fafc;
+            background: #020617;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            border-radius: 6px;
+            font: inherit;
+        }
+
+        .create-item-dialog input:focus {
+            outline: 2px solid #60a5fa;
+            outline-offset: 1px;
+        }
+
+        .create-item-error {
+            min-height: 1.25em;
+            margin: 8px 0 0;
+            color: #fca5a5;
+            font-size: 0.9rem;
+        }
+
+        .create-item-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 18px;
         }
 
         @media (max-width: 900px) {
@@ -366,6 +443,19 @@ $studentTree = get_student_tree($targetStudentId);
         </div>
     </div>
 
+    <dialog id="create-item-dialog" class="create-item-dialog" aria-labelledby="create-item-title">
+        <form id="create-item-form">
+            <h2 id="create-item-title">Buat item baru</h2>
+            <label for="create-item-name">Nama</label>
+            <input id="create-item-name" name="name" type="text" maxlength="64" autocomplete="off" required>
+            <p id="create-item-error" class="create-item-error" role="alert"></p>
+            <div class="create-item-actions">
+                <button class="button-like" id="cancel-create-item" type="button">Batal</button>
+                <button class="button-like primary" id="submit-create-item" type="submit">Buat</button>
+            </div>
+        </form>
+    </dialog>
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
@@ -392,6 +482,9 @@ $studentTree = get_student_tree($targetStudentId);
             currentFile: '',
             currentFileName: '',
             parentPath: '',
+            autosaveTimer: null,
+            isLoadingFile: false,
+            pendingCreateType: '',
         };
 
         const fileTree = document.getElementById('file-tree');
@@ -399,6 +492,11 @@ $studentTree = get_student_tree($targetStudentId);
         const currentPathLabel = document.getElementById('current-path');
         const activeFileLabel = document.getElementById('active-file');
         const previewFrame = document.getElementById('live-preview');
+        const newFolderButton = document.getElementById('new-folder-btn');
+        const newFileButton = document.getElementById('new-file-btn');
+
+        if (newFolderButton) newFolderButton.addEventListener('click', () => createItem('folder'));
+        if (newFileButton) newFileButton.addEventListener('click', () => createItem('file'));
 
         const editor = CodeMirror(document.getElementById('editor-container'), {
             mode: 'htmlmixed',
@@ -445,6 +543,10 @@ $studentTree = get_student_tree($targetStudentId);
 
         function getFileExtension(fileName) {
             return (fileName || '').split('.').pop()?.toLowerCase() || '';
+        }
+
+        function isDatabaseFile(fileName) {
+            return ['sqlite', 'db', 'db3'].includes(getFileExtension(fileName));
         }
 
         function getHintWords(fileName) {
@@ -734,6 +836,7 @@ $studentTree = get_student_tree($targetStudentId);
             const formatted = prettyFormatCode(editor.getValue(), ext);
             editor.setValue(formatted);
             updateEditorWarnings();
+            scheduleCurrentFileAutosave(formatted);
             showStatus('Kode berhasil diformat.');
         }
 
@@ -824,22 +927,35 @@ $studentTree = get_student_tree($targetStudentId);
             state.currentPath = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '';
             state.currentFile = path;
             state.currentFileName = fileName;
+            state.isLoadingFile = true;
             updateCurrentPath();
             activeFileLabel.textContent = fileName;
             editor.setOption('mode', detectMode(fileName));
+            editor.setOption('readOnly', isDatabaseFile(fileName));
+            const saveButton = document.getElementById('save-btn');
+            if (saveButton) {
+                saveButton.disabled = isDatabaseFile(fileName);
+                saveButton.title = isDatabaseFile(fileName) ? 'Database SQLite hanya dapat dilihat dari workspace.' : '';
+            }
 
-            const ext = getFileExtension(fileName);
-            if (ext === 'sqlite' || ext === 'db' || ext === 'db3') {
+            if (isDatabaseFile(fileName)) {
                 try {
                     const response = await fetch(`api/student-db.php?student_id=${studentId}&action=tables`);
                     const data = await response.json();
+                    if (!response.ok || data.success === false) {
+                        throw new Error(data.message || 'Gagal memuat daftar tabel SQLite.');
+                    }
                     const tables = Array.isArray(data.tables) ? data.tables : [];
-                    const html = tables.length ? `<ul>${tables.map((table) => `<li>${escapeHtml(table)}</li>`).join('')}</ul>` : '<p>Belum ada tabel di database ini.</p>';
+                    const html = tables.length
+                        ? `<ul>${tables.map((table) => `<li><button type="button" class="sqlite-table-button" data-sqlite-table="${escapeHtml(table)}">${escapeHtml(table)}</button></li>`).join('')}</ul>`
+                        : '<p>Belum ada tabel di database ini.</p>';
                     document.getElementById('sql-results').innerHTML = `<div class="sqlite-table-list"><strong>Daftar tabel SQLite</strong>${html}</div>`;
-                    editor.setValue(`-- Database: ${escapeHtml(fileName)}\n-- Tabel tersedia:\n${tables.map((table) => `SELECT * FROM ${table};`).join('\n') || '-- belum ada tabel'}`);
+                    editor.setValue(`-- Database: ${fileName}\n-- Tabel tersedia:\n${tables.map((table) => `SELECT * FROM ${quoteSqlIdentifier(table)} LIMIT 100;`).join('\n') || '-- belum ada tabel'}`);
+                    state.isLoadingFile = false;
                     showStatus(`Database SQLite terhubung: ${tables.length} tabel terdeteksi.`);
                     return;
                 } catch (error) {
+                    state.isLoadingFile = false;
                     showStatus(error.message, true);
                     return;
                 }
@@ -847,11 +963,13 @@ $studentTree = get_student_tree($targetStudentId);
 
             fetchWorkspace('read', { path }).then((data) => {
                 editor.setValue(data.content || '');
+                state.isLoadingFile = false;
                 renderPreview();
                 updateEditorWarnings();
                 showStatus(`Membuka file: ${path}`);
             }).catch((error) => {
                 editor.setValue('');
+                state.isLoadingFile = false;
                 renderPreview();
                 updateEditorWarnings();
                 showStatus(error.message, true);
@@ -891,12 +1009,35 @@ $studentTree = get_student_tree($targetStudentId);
             }
         }
 
+        function scheduleCurrentFileAutosave(content = editor.getValue()) {
+            if (userRole !== 'student' || !state.currentFile || state.isLoadingFile || isDatabaseFile(state.currentFileName)) return;
+
+            window.clearTimeout(state.autosaveTimer);
+            const path = state.currentFile;
+            state.autosaveTimer = window.setTimeout(async () => {
+                state.autosaveTimer = null;
+                try {
+                    const data = await fetchWorkspaceByPost('save-file', { path, content });
+                    if (state.currentFile === path) showStatus(`Disimpan otomatis: ${data.path}`);
+                } catch (error) {
+                    if (state.currentFile === path) showStatus(`Autosave gagal: ${error.message}`, true);
+                }
+            }, 700);
+        }
+
         async function saveCurrentFile() {
             if (!state.currentFile) {
                 showStatus('Pilih file terlebih dahulu.', true);
                 return;
             }
 
+            if (isDatabaseFile(state.currentFileName)) {
+                showStatus('File database SQLite tidak dapat disimpan sebagai teks.', true);
+                return;
+            }
+
+            window.clearTimeout(state.autosaveTimer);
+            state.autosaveTimer = null;
             try {
                 const payload = { path: state.currentFile, content: editor.getValue() };
                 const data = await fetchWorkspaceByPost('save-file', payload);
@@ -907,28 +1048,61 @@ $studentTree = get_student_tree($targetStudentId);
             }
         }
 
-        async function createItem(type) {
-            const name = window.prompt(type === 'folder' ? 'Nama folder baru:' : 'Nama file baru:');
+        function createItem(type) {
+            const dialog = document.getElementById('create-item-dialog');
+            const title = document.getElementById('create-item-title');
+            const nameInput = document.getElementById('create-item-name');
+            const errorMessage = document.getElementById('create-item-error');
+            state.pendingCreateType = type;
+            title.textContent = type === 'folder' ? 'Buat folder baru' : 'Buat file baru';
+            nameInput.value = '';
+            errorMessage.textContent = '';
+            dialog.showModal();
+            nameInput.focus();
+        }
+
+        async function submitCreateItem(event) {
+            event.preventDefault();
+            const type = state.pendingCreateType;
+            const name = document.getElementById('create-item-name').value.trim();
+            const errorMessage = document.getElementById('create-item-error');
+            const submitButton = document.getElementById('submit-create-item');
             if (!name) {
+                errorMessage.textContent = 'Nama tidak boleh kosong.';
                 return;
             }
 
             const parentPath = state.currentPath || '';
+            submitButton.disabled = true;
+            errorMessage.textContent = '';
             try {
                 const data = await fetchWorkspaceByPost(type === 'folder' ? 'create-folder' : 'create-file', {
                     parent_path: parentPath,
                     name,
                 });
+                document.getElementById('create-item-dialog').close();
                 showStatus(`${type === 'folder' ? 'Folder' : 'File'} dibuat: ${data.path}`);
                 await refreshTree();
             } catch (error) {
-                showStatus(error.message, true);
+                errorMessage.textContent = error.message;
+            } finally {
+                submitButton.disabled = false;
             }
         }
+
+        document.getElementById('create-item-form').addEventListener('submit', submitCreateItem);
+        document.getElementById('cancel-create-item').addEventListener('click', () => {
+            document.getElementById('create-item-dialog').close();
+        });
 
         async function deleteCurrentFile() {
             if (!state.currentFile) {
                 showStatus('Pilih file atau folder yang ingin dihapus.', true);
+                return;
+            }
+
+            if (isDatabaseFile(state.currentFileName)) {
+                showStatus('Database SQLite tidak dapat dihapus dari editor.', true);
                 return;
             }
 
@@ -957,6 +1131,23 @@ $studentTree = get_student_tree($targetStudentId);
             }
         });
 
+        editor.on('change', (cm, change) => {
+            if (change.origin !== 'setValue') scheduleCurrentFileAutosave(cm.getValue());
+        });
+
+        window.addEventListener('beforeunload', () => {
+            if (userRole !== 'student' || !state.currentFile || state.isLoadingFile || isDatabaseFile(state.currentFileName)) return;
+
+            window.clearTimeout(state.autosaveTimer);
+            const payload = new URLSearchParams({
+                action: 'save-file',
+                student_id: String(studentId),
+                path: state.currentFile,
+                content: editor.getValue(),
+            });
+            navigator.sendBeacon('api/workspace.php', payload);
+        });
+
         editor.on('keydown', (cm, event) => {
             if ((event.ctrlKey || event.metaKey) && event.key === ' ') {
                 event.preventDefault();
@@ -965,7 +1156,17 @@ $studentTree = get_student_tree($targetStudentId);
         });
 
         editor.on('inputRead', (cm, change) => {
-            if (!['html', 'htm'].includes(getFileExtension(state.currentFileName)) || !change.text.includes('>')) return;
+            const extension = getFileExtension(state.currentFileName);
+            const insertedText = change.text.join('\n');
+            if (change.origin !== 'complete' && ['html', 'htm', 'css', 'js', 'php'].includes(extension) && /[A-Za-z0-9_-]$/.test(insertedText)) {
+                const hint = suggestCodeHints(cm);
+                const prefixLength = cm.indexFromPos(hint.to) - cm.indexFromPos(hint.from);
+                if (prefixLength >= 2 && hint.list.length) {
+                    CodeMirror.showHint(cm, suggestCodeHints, { completeSingle: false, alignWithWord: true });
+                }
+            }
+
+            if (!['html', 'htm'].includes(extension) || !insertedText.includes('>')) return;
             const cursor = cm.getCursor();
             const line = cm.getLine(cursor.line);
             const openingTag = line.slice(0, cursor.ch).match(/<([A-Za-z][\w:-]*)(?:\s[^<>]*)?>$/);
@@ -988,53 +1189,75 @@ $studentTree = get_student_tree($targetStudentId);
             }
 
             try {
-                const form = new URLSearchParams({
-                    action: 'execute',
-                    student_id: String(studentId),
-                    query,
-                });
-
-                const response = await fetch('api/student-db.php', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-                    body: form.toString(),
-                });
-                const data = await response.json();
-
-                if (!response.ok || data.success === false) {
-                    throw new Error(data.message || 'Query gagal dieksekusi.');
-                }
-
-                const tableContainer = document.getElementById('sql-results');
-                if (data.type === 'read' && data.rows && data.rows.length) {
-                    const headers = data.columns || Object.keys(data.rows[0]);
-                    const rowsHtml = data.rows.map((row) => {
-                        return `<tr>${headers.map((header) => `<td>${escapeHtml(String(row[header] ?? ''))}</td>`).join('')}</tr>`;
-                    }).join('');
-
-                    tableContainer.innerHTML = `
-                        <table>
-                            <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
-                            <tbody>${rowsHtml}</tbody>
-                        </table>
-                    `;
-                } else {
-                    const summary = data.type === 'write' ? `Affected rows: ${data.affected_rows ?? 0}` : 'Query berhasil dieksekusi.';
-                    tableContainer.innerHTML = `<div style="padding:12px; color:#dfeaf9;">${escapeHtml(summary)}</div>`;
-                }
-
+                await executeSqlQuery(query);
                 showStatus('Query SQLite berhasil dijalankan.');
             } catch (error) {
                 showStatus(error.message, true);
             }
         }
 
+        function quoteSqlIdentifier(identifier) {
+            return `"${String(identifier).replace(/"/g, '""')}"`;
+        }
+
+        async function executeSqlQuery(query) {
+            const form = new URLSearchParams({
+                action: 'execute',
+                student_id: String(studentId),
+                query,
+            });
+            const response = await fetch('api/student-db.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+                body: form.toString(),
+            });
+            const data = await response.json();
+
+            if (!response.ok || data.success === false) {
+                throw new Error(data.message || 'Query gagal dieksekusi.');
+            }
+
+            const tableContainer = document.getElementById('sql-results');
+            if (data.type === 'read' && data.rows && data.rows.length) {
+                const headers = data.columns || Object.keys(data.rows[0]);
+                const rowsHtml = data.rows.map((row) => {
+                    return `<tr>${headers.map((header) => `<td>${escapeHtml(String(row[header] ?? ''))}</td>`).join('')}</tr>`;
+                }).join('');
+
+                const tableList = tableContainer.querySelector('.sqlite-table-list')?.outerHTML || '';
+                tableContainer.innerHTML = `${tableList}
+                    <table>
+                        <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
+                        <tbody>${rowsHtml}</tbody>
+                    </table>
+                `;
+            } else {
+                const summary = data.type === 'write' ? `Affected rows: ${data.affected_rows ?? 0}` : 'Query berhasil dieksekusi.';
+                const tableList = tableContainer.querySelector('.sqlite-table-list')?.outerHTML || '';
+                tableContainer.innerHTML = `${tableList}<div style="padding:12px; color:#dfeaf9;">${escapeHtml(summary)}</div>`;
+            }
+        }
+
+        async function previewSqliteTable(tableName) {
+            const query = `SELECT * FROM ${quoteSqlIdentifier(tableName)} LIMIT 100;`;
+            document.getElementById('sql-editor').value = query;
+            try {
+                await executeSqlQuery(query);
+                showStatus(`Menampilkan hingga 100 baris dari tabel ${tableName}.`);
+            } catch (error) {
+                showStatus(error.message, true);
+            }
+        }
+
+        document.getElementById('sql-results').addEventListener('click', (event) => {
+            const tableButton = event.target.closest('button[data-sqlite-table]');
+            if (tableButton) previewSqliteTable(tableButton.dataset.sqliteTable);
+        });
+
         document.getElementById('refresh-btn').addEventListener('click', refreshTree);
         document.getElementById('format-btn').addEventListener('click', formatCurrentCode);
         document.getElementById('save-btn').addEventListener('click', saveCurrentFile);
         document.getElementById('delete-btn').addEventListener('click', deleteCurrentFile);
-        document.getElementById('new-folder-btn').addEventListener('click', () => createItem('folder'));
-        document.getElementById('new-file-btn').addEventListener('click', () => createItem('file'));
         document.getElementById('preview-refresh-btn').addEventListener('click', renderPreview);
         document.getElementById('run-sql-btn').addEventListener('click', runSqlQuery);
 

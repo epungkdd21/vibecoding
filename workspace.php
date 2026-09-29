@@ -568,22 +568,32 @@ $studentTree = get_student_tree($targetStudentId);
             }
 
             if (ext === 'css' || ext === 'js' || ext === 'php') {
-                const source = maskCodeCommentsAndStrings(code, ext);
-                const openBraces = [];
+                const masked = maskCodeCommentsAndStrings(code, ext);
+                const openDelimiters = [];
+                const closingPairs = { ')': '(', ']': '[', '}': '{' };
                 let lineNo = 1;
-                for (const char of source) {
-                    if (char === '{') {
-                        openBraces.push(lineNo);
-                    } else if (char === '}') {
-                        if (openBraces.length) {
-                            openBraces.pop();
+                for (const char of masked.code) {
+                    if (char === '(' || char === '[' || char === '{') {
+                        openDelimiters.push({ char, line: lineNo });
+                    } else if (char in closingPairs) {
+                        let matchingIndex = -1;
+                        for (let index = openDelimiters.length - 1; index >= 0; index -= 1) {
+                            if (openDelimiters[index].char === closingPairs[char]) {
+                                matchingIndex = index;
+                                break;
+                            }
+                        }
+                        if (matchingIndex >= 0) {
+                            openDelimiters.slice(matchingIndex + 1).forEach((entry) => issues.push(entry.line));
+                            openDelimiters.splice(matchingIndex);
                         } else {
                             issues.push(lineNo);
                         }
                     }
                     if (char === '\n') lineNo += 1;
                 }
-                issues.push(...openBraces);
+                issues.push(...openDelimiters.map((entry) => entry.line));
+                if (masked.unclosedStringLine) issues.push(masked.unclosedStringLine);
             }
 
             return [...new Set(issues.filter((line) => line > 0))];
@@ -594,6 +604,8 @@ $studentTree = get_student_tree($targetStudentId);
             let stateName = '';
             let quote = '';
             let escaped = false;
+            let stringStartLine = 0;
+            let lineNo = 1;
 
             for (let index = 0; index < chars.length; index += 1) {
                 const char = chars[index];
@@ -602,6 +614,7 @@ $studentTree = get_student_tree($targetStudentId);
                 if (stateName === 'line-comment') {
                     if (char === '\n') stateName = '';
                     else chars[index] = ' ';
+                    if (char === '\n') lineNo += 1;
                     continue;
                 }
                 if (stateName === 'block-comment') {
@@ -613,6 +626,7 @@ $studentTree = get_student_tree($targetStudentId);
                     } else if (char !== '\n') {
                         chars[index] = ' ';
                     }
+                    if (char === '\n') lineNo += 1;
                     continue;
                 }
                 if (stateName === 'string') {
@@ -624,6 +638,7 @@ $studentTree = get_student_tree($targetStudentId);
                     } else if (char === quote) {
                         stateName = '';
                     }
+                    if (char === '\n') lineNo += 1;
                     continue;
                 }
 
@@ -642,12 +657,17 @@ $studentTree = get_student_tree($targetStudentId);
                     stateName = 'line-comment';
                 } else if (char === '"' || char === "'" || (ext === 'js' && char === '`')) {
                     quote = char;
+                    stringStartLine = lineNo;
                     chars[index] = ' ';
                     stateName = 'string';
                 }
+                if (char === '\n') lineNo += 1;
             }
 
-            return chars.join('');
+            return {
+                code: chars.join(''),
+                unclosedStringLine: stateName === 'string' ? stringStartLine : 0,
+            };
         }
 
         function prettyFormatCode(code, ext) {
